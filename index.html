@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>空の薬便ルート</title>
+<script src="https://cdn.jsdelivr.net/npm/cesium@1.123.0/Build/Cesium/Cesium.js"></script>
+<link href="https://cdn.jsdelivr.net/npm/cesium@1.123.0/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+<style>
+  html,body,#map{margin:0;width:100%;height:100%;overflow:hidden;font-family:"Hiragino Sans","Noto Sans JP",sans-serif}
+  #panel{position:absolute;top:12px;left:12px;width:340px;max-height:calc(100% - 24px);overflow:auto;background:rgba(18,24,32,.88);color:#eef2f6;border-radius:10px;padding:14px 16px;font-size:13px;line-height:1.55;box-sizing:border-box}
+  #panel h1{font-size:17px;margin:0 0 2px}
+  #panel .sub{color:#9fb0c0;font-size:12px;margin-bottom:10px}
+  #panel label{display:block;margin:8px 0 2px;color:#c9d6e2}
+  #panel select,#panel input{width:100%;box-sizing:border-box;padding:5px;border-radius:6px;border:1px solid #445;background:#0f141a;color:#eef}
+  #panel button{margin-top:10px;width:100%;padding:8px;border:0;border-radius:6px;background:#2f8f6f;color:#fff;font-weight:600;cursor:pointer}
+  #panel button:disabled{background:#555;cursor:wait}
+  table{width:100%;border-collapse:collapse;margin-top:10px}
+  td{padding:3px 0;border-bottom:1px solid #2a3440;vertical-align:top}
+  td:last-child{text-align:right;font-variant-numeric:tabular-nums}
+  .ok{color:#6fe0a8}.ng{color:#ff8a7a}.warn{color:#ffd27a}
+  #profile{width:100%;height:110px;margin-top:10px;background:#0f141a;border-radius:6px}
+  #legend{font-size:11px;color:#9fb0c0;margin-top:8px}
+  .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+  @media (max-width:600px){#panel{width:calc(100% - 24px);max-height:45%}}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+  <h1>空の薬便ルート</h1>
+  <div class="sub">PLATEAU 3D都市モデルで、浸水時に薬を運ぶドローンの高さと道のりを決める（仙台市）</div>
+  <label>出発（薬の拠点）</label>
+  <select id="from"></select>
+  <label>届け先（避難所）</label>
+  <select id="to"></select>
+  <label>建物との余裕（m）</label>
+  <input id="margin" type="number" value="30" min="10" max="60" step="5">
+  <label>ドローンの巡航速度（km/h）</label>
+  <input id="speed" type="number" value="40" min="20" max="80" step="5">
+  <button id="run" disabled>読み込み中…</button>
+  <table id="result"></table>
+  <canvas id="profile" width="620" height="220"></canvas>
+  <div id="legend"><span class="sw" style="background:#7aa7ff"></span>建物の高さ <span class="sw" style="background:#3fb3ff;opacity:.6"></span>浸水想定区域 <span class="sw" style="background:#6fe0a8"></span>飛行高度 <span class="sw" style="background:#ff8a7a"></span>地上150m（許可なしの上限）</div>
+</div>
+<script>
+// PLATEAU 2024 仙台市（G空間情報センター / PLATEAU配信サービス）
+const T = {
+  bldg: [
+    "https://assets.cms.plateau.reearth.io/assets/1a/082bec-f0d3-45b7-b7ce-94c9c9411928/04100_sendai-shi_city_2024_citygml_1_op_bldg_3dtiles_04104_taihaku-ku_lod1/tileset.json",
+    "https://assets.cms.plateau.reearth.io/assets/35/d17bce-10fb-42b7-a31d-b6a37c55ed90/04100_sendai-shi_city_2024_citygml_1_op_bldg_3dtiles_04103_wakabayashi-ku_lod1/tileset.json",
+    "https://assets.cms.plateau.reearth.io/assets/ec/e80d4a-8b3a-4f88-ae4e-d29c9f3e9647/04100_sendai-shi_city_2024_citygml_1_op_bldg_3dtiles_04101_aoba-ku_lod1/tileset.json"
+  ],
+  fld: [
+    "https://assets.cms.plateau.reearth.io/assets/49/fda0e0-2c28-41f3-ad5c-d0cb362d29d7/04100_sendai-shi_city_2024_citygml_1_op_fld_natl_natorigawa_natorigawa_3dtiles_l1_no_texture/tileset.json",
+    "https://assets.cms.plateau.reearth.io/assets/6d/10ff58-fe24-4dbf-a1df-20e45b263f3d/04100_sendai-shi_city_2024_citygml_1_op_fld_natl_natorigawa_hirosegawa-2_3dtiles_l1_no_texture/tileset.json"
+  ]
+};
+// 地点の座標は地図上の概略位置（デモ用）
+const P = {
+  hosp:  {name:"仙台市立病院付近（太白区あすと長町）", lon:140.8833, lat:38.2245},
+  st:    {name:"長町駅前の薬局街（太白区）",           lon:140.8875, lat:38.2275},
+  rokugo:{name:"六郷小学校付近（若林区）",             lon:140.9308, lat:38.2230},
+  arai:  {name:"荒井駅付近（若林区）",                 lon:140.9330, lat:38.2410},
+  oroshi:{name:"卸町付近（若林区）",                   lon:140.9150, lat:38.2470}
+};
+const fromSel=document.getElementById('from'), toSel=document.getElementById('to');
+for (const [k,v] of Object.entries(P)) {
+  fromSel.add(new Option(v.name,k)); toSel.add(new Option(v.name,k));
+}
+fromSel.value='hosp'; toSel.value='rokugo';
+
+const viewer = new Cesium.Viewer('map', {
+  baseLayer: new Cesium.ImageryLayer(new Cesium.UrlTemplateImageryProvider({
+    url:'https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', maximumLevel:18, credit:'地理院タイル'})),
+  baseLayerPicker:false, geocoder:false, timeline:false, animation:false, homeButton:false,
+  sceneModePicker:false, navigationHelpButton:false, fullscreenButton:false, infoBox:false, selectionIndicator:false
+});
+viewer.scene.globe.depthTestAgainstTerrain = false;
+viewer.scene.skyAtmosphere.show = true;
+const bldgSets=[], fldSets=[];
+let routeEntities=[];
+
+async function load(){
+  for (const u of T.bldg){
+    const t = await Cesium.Cesium3DTileset.fromUrl(u,{maximumScreenSpaceError:8});
+    t.style = new Cesium.Cesium3DTileStyle({color:"color('#d9e2ec',0.95)"});
+    viewer.scene.primitives.add(t); bldgSets.push(t);
+  }
+  for (const u of T.fld){
+    const t = await Cesium.Cesium3DTileset.fromUrl(u,{maximumScreenSpaceError:8});
+    t.style = new Cesium.Cesium3DTileStyle({color:"color('#3fb3ff',0.45)"});
+    viewer.scene.primitives.add(t); fldSets.push(t);
+  }
+  viewer.camera.flyTo({destination:Cesium.Cartesian3.fromDegrees(140.905,38.180,4200),
+    orientation:{heading:Cesium.Math.toRadians(0),pitch:Cesium.Math.toRadians(-38)},duration:0});
+  const b=document.getElementById('run'); b.disabled=false; b.textContent='ルートを計算する';
+}
+
+function dist(a,b){
+  const g=new Cesium.EllipsoidGeodesic(Cesium.Cartographic.fromDegrees(a.lon,a.lat),Cesium.Cartographic.fromDegrees(b.lon,b.lat));
+  return g.surfaceDistance;
+}
+
+async function run(){
+  const btn=document.getElementById('run'); btn.disabled=true; btn.textContent='3D都市モデルを調べています…';
+  routeEntities.forEach(e=>viewer.entities.remove(e)); routeEntities=[];
+  const A=P[fromSel.value], B=P[toSel.value];
+  const margin=+document.getElementById('margin').value, speed=+document.getElementById('speed').value;
+  const D=dist(A,B), N=Math.max(60,Math.round(D/25));
+  const pts=[]; for(let i=0;i<=N;i++){const f=i/N; pts.push(Cesium.Cartographic.fromDegrees(A.lon+(B.lon-A.lon)*f, A.lat+(B.lat-A.lat)*f));}
+  // まず経路の上にカメラを寄せ、細かいタイルを読み込ませる
+  const mid=Cesium.Cartesian3.fromDegrees((A.lon+B.lon)/2,(A.lat+B.lat)/2-D/111000*0.9,D*0.9);
+  await new Promise(r=>viewer.camera.flyTo({destination:mid,orientation:{heading:0,pitch:Cesium.Math.toRadians(-42)},duration:1.5,complete:r}));
+  // 建物の上面の高さ（浸水モデルは除く）
+  const b1=await viewer.scene.sampleHeightMostDetailed(pts.map(p=>p.clone()), fldSets);
+  // 浸水想定区域かどうか（建物は除く）
+  const f1=await viewer.scene.sampleHeightMostDetailed(pts.map(p=>p.clone()), bldgSets);
+  // 地面の高さ：建物も浸水も除いた最小値を、建物の無い点から推定
+  const hs=b1.map(p=>p&&p.height!==undefined?p.height:null);
+  const valid=hs.filter(h=>h!==null).sort((x,y)=>x-y);
+  const ground = valid.length? valid[Math.floor(valid.length*0.1)] : 40;
+  const bldgH = hs.map(h=>h===null?0:Math.max(0,h-ground));
+  const inFlood = f1.map(p=>!!(p&&p.height!==undefined));
+  const maxB=Math.max(...bldgH);
+  const cruise=Math.ceil((maxB+margin)/5)*5;
+  const floodLen = inFlood.filter(Boolean).length/N*D;
+  const minutes = D/1000/speed*60 + 2; // 上昇・降下に2分
+  const legal = cruise<=150;
+  // 描画
+  const line = pts.map(p=>Cesium.Cartesian3.fromRadians(p.longitude,p.latitude,ground+cruise));
+  routeEntities.push(viewer.entities.add({polyline:{positions:line,width:5,material:new Cesium.PolylineGlowMaterialProperty({glowPower:.25,color:Cesium.Color.fromCssColorString('#6fe0a8')})}}));
+  routeEntities.push(viewer.entities.add({polyline:{positions:pts.map(p=>Cesium.Cartesian3.fromRadians(p.longitude,p.latitude,ground+1)),width:2,material:new Cesium.PolylineDashMaterialProperty({color:Cesium.Color.WHITE.withAlpha(.7)})}}));
+  for (const [p,label] of [[A,'出発'],[B,'届け先']]){
+    routeEntities.push(viewer.entities.add({position:Cesium.Cartesian3.fromDegrees(p.lon,p.lat,ground+cruise),
+      point:{pixelSize:10,color:Cesium.Color.fromCssColorString('#6fe0a8')},
+      label:{text:label+'：'+p.name,font:'13px sans-serif',fillColor:Cesium.Color.WHITE,showBackground:true,backgroundColor:Cesium.Color.fromCssColorString('#121820cc'),pixelOffset:new Cesium.Cartesian2(0,-22)}}));
+    routeEntities.push(viewer.entities.add({polyline:{positions:[Cesium.Cartesian3.fromDegrees(p.lon,p.lat,ground),Cesium.Cartesian3.fromDegrees(p.lon,p.lat,ground+cruise)],width:2,material:Cesium.Color.fromCssColorString('#6fe0a8')}}));
+  }
+  // 一番高い建物に印
+  const iMax=bldgH.indexOf(maxB);
+  routeEntities.push(viewer.entities.add({position:Cesium.Cartesian3.fromRadians(pts[iMax].longitude,pts[iMax].latitude,ground+maxB+3),
+    label:{text:'経路上で一番高い建物 '+maxB.toFixed(0)+'m',font:'12px sans-serif',fillColor:Cesium.Color.fromCssColorString('#ffd27a'),showBackground:true,backgroundColor:Cesium.Color.fromCssColorString('#121820cc')}}));
+  // 表
+  const r=document.getElementById('result');
+  r.innerHTML=`
+   <tr><td>直線距離</td><td>${(D/1000).toFixed(2)} km</td></tr>
+   <tr><td>経路上で一番高い建物</td><td>${maxB.toFixed(0)} m</td></tr>
+   <tr><td>決めた飛行高度（地上から）</td><td>${cruise} m</td></tr>
+   <tr><td>許可なしで飛べる150m以内か</td><td class="${legal?'ok':'ng'}">${legal?'はい':'いいえ（許可が要る）'}</td></tr>
+   <tr><td>浸水想定区域の上を飛ぶ長さ</td><td class="${floodLen>0?'warn':''}">${(floodLen/1000).toFixed(2)} km</td></tr>
+   <tr><td>届くまで（上昇・降下2分込み）</td><td>約 ${minutes.toFixed(0)} 分</td></tr>
+   <tr><td>道路</td><td class="${floodLen>0?'ng':'ok'}">${floodLen>0?'浸水想定区域を通るため車は使えない想定':'浸水想定区域を通らない'}</td></tr>`;
+  drawProfile(bldgH,inFlood,cruise,D);
+  btn.disabled=false; btn.textContent='ルートを計算する';
+  window.__result={D,maxB,cruise,legal,floodLen,minutes,ground};
+}
+
+function drawProfile(h,fl,cruise,D){
+  const c=document.getElementById('profile'), x=c.getContext('2d'), W=c.width, H=c.height;
+  x.clearRect(0,0,W,H); const top=170, sy=v=>H-14-(v/top)*(H-28), n=h.length;
+  for(let i=0;i<n;i++){ if(fl[i]){x.fillStyle='rgba(63,179,255,.35)';x.fillRect(i/n*W,0,W/n+1,H-14);} }
+  x.fillStyle='#7aa7ff'; for(let i=0;i<n;i++){ if(h[i]>0){x.fillRect(i/n*W,sy(h[i]),W/n+0.5,H-14-sy(h[i]));} }
+  x.strokeStyle='#ff8a7a'; x.setLineDash([6,4]); x.beginPath(); x.moveTo(0,sy(150)); x.lineTo(W,sy(150)); x.stroke(); x.setLineDash([]);
+  x.strokeStyle='#6fe0a8'; x.lineWidth=3; x.beginPath(); x.moveTo(0,H-14); x.lineTo(8,sy(cruise)); x.lineTo(W-8,sy(cruise)); x.lineTo(W,H-14); x.stroke(); x.lineWidth=1;
+  x.fillStyle='#9fb0c0'; x.font='18px sans-serif'; x.fillText('0 km',4,H-1); x.fillText((D/1000).toFixed(1)+' km',W-70,H-1); x.fillText(cruise+'m',12,sy(cruise)-6); x.fillText('150m',W-60,sy(150)-6);
+}
+document.getElementById('run').onclick=run;
+load().catch(e=>{document.getElementById('run').textContent='読み込みに失敗：'+e.message;});
+</script>
+</body>
+</html>
